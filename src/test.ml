@@ -1,5 +1,3 @@
-open Lwt
-
 (*
 let h,w = 24,80
 let h,w = 15,50
@@ -53,7 +51,7 @@ module Cell : sig
 
   val make : unit -> t
   val update : t -> t
-  val print : t -> unit -> unit Lwt.t
+  val to_markup : t -> LTerm_text.markup
 
 end = struct
 
@@ -96,12 +94,12 @@ end = struct
     in
     LTerm_style.rgb (cap r) (cap g) (cap b)
 
-  let print cell () = match cell with
+  let to_markup = function
     | None ->
-      LTerm.prints LTerm_text.(eval [S "　"])
+      LTerm_text.([S "　"])
     | Some (code,colour) ->
       let utf8 = utf8_of_code code in
-      LTerm.prints LTerm_text.(eval [
+      LTerm_text.([
           B_fg (index colour) ;
           S (Format.sprintf "%s" utf8) ;
           E_fg ;
@@ -115,7 +113,7 @@ module Line : sig
 
   val make : w:int -> t
   val update_copy : t -> t -> unit
-  val print : t -> unit -> unit Lwt.t
+  val to_markup : t -> LTerm_text.markup
 
 end = struct
 
@@ -130,10 +128,10 @@ end = struct
     in
     Array.iteri update_copy_cell old_line
 
-  let print line () =
-    Array.fold_left (fun x cell -> x >>= Cell.print cell)
-      (Lwt.return ()) line ;%lwt
-    LTerm.printlf ""
+  let to_markup =
+    let aux accum cell = List.rev_append (Cell.to_markup cell) accum in
+    fun line ->
+      List.rev @@ ((LTerm_text.S "\n") :: Array.fold_left aux [] line)
 
 end
 
@@ -143,7 +141,7 @@ module Matrix : sig
 
   val make : h:int -> w:int -> t
   val step : t -> t
-  val print : t -> unit -> unit Lwt.t
+  val to_markup : t -> LTerm_text.markup
 
 end = struct
 
@@ -177,20 +175,22 @@ end = struct
     let rec aux n accum =
       if n<h+old_offset then begin
         let n' = if n < h then n else n - h in
-        f (Array.get lines n') accum >>= aux (n+1)
-      end else Lwt.return accum
+        f (Array.get lines n') accum |> aux (n+1)
+      end else accum
     in
     fun seed -> aux old_offset seed
 
-  let print = fold Line.print
+  let to_markup =
+    let aux line accum = List.rev_append (Line.to_markup line) accum in
+    fun matrix -> fold aux matrix []
 
 end
 
 let () =
   let rec aux matrix =
+    Matrix.to_markup matrix |> List.rev |> LTerm_text.eval |> LTerm.prints ;%lwt
     Lwt_unix.sleep frame_rate ;%lwt
     let matrix = Matrix.step matrix in
-    Matrix.print matrix () ;%lwt
     aux matrix
   in
   Matrix.make ~w ~h |> aux |> Lwt_main.run
