@@ -47,48 +47,56 @@ let pick =
     | None -> code_of_utf8 " "
     | Some c -> c
 
-let cells = Array.init h (fun _ -> Array.init w (fun _ -> None))
-let offset = ref 0
+module Cell : sig
 
-let step =
-  fun () ->
-    let fresh_offset = if !offset>0 then !offset-1 else !offset-1+h in
-    let line = Array.get cells !offset
-    and fresh_line = Array.get cells fresh_offset in
-    let update key value =
-      let value' = match value with
-        | Some (_,colour) ->
-          let colour = colour *. (0.82 +. Random.float 0.18) in
-          if colour>0.07 then Some (pick (),colour) else None
-        | None ->
-          if Random.float 1. < density
-          then Some (pick (),1.)
-          else None
+  type t
+
+  val make : unit -> t
+  val update : t -> t
+  val print : t -> unit -> unit Lwt.t
+
+end = struct
+
+  type t = (int * float) option
+
+  let make () = None
+
+  let update = function
+    | Some (_,colour) ->
+      let colour = colour *. (0.82 +. Random.float 0.18) in
+      if colour>0.07 then Some (pick (),colour) else None
+    | None ->
+      if Random.float 1. < density
+      then Some (pick (),1.)
+      else None
+
+  let index colour =
+    let point0,colour0 = Gg.V3.v 0. 0. 0., 0.
+    and pcs = [
+      Gg.V3.v 0. 1. 0., 0.5 ;
+      Gg.V3.v 1. 1. 1., 1. ;
+    ] in
+    let r,g,b =
+      let point =
+        let rec aux (point0,colour0) = function
+          | [] -> point0
+          | (point1,colour1 as pc1)::l ->
+            if colour<colour1 then Gg.V3.mix point0 point1 ((colour-.colour0)/.(colour1-.colour0))
+            else aux pc1 l
+        in
+        if colour<colour0 then point0
+        else aux (point0,colour0) pcs
       in
-      Array.set fresh_line key value'
+      Gg.V3.to_tuple point
+    and cap x =
+      let y = int_of_float @@ x *. 256. in
+      if y<0 then 0
+      else if y>255 then 255
+      else y
     in
-    Array.iteri update line ;
-    offset := fresh_offset ;
-    Lwt.return ()
+    LTerm_style.rgb (cap r) (cap g) (cap b)
 
-let index colour =
-  let r,g,b =
-    if colour<0.10 then 0,0,0
-    else if colour<0.19 then 0,1,0
-    else if colour<0.28 then 0,2,0
-    else if colour<0.37 then 0,3,0
-    else if colour<0.46 then 0,4,0
-    else if colour<0.55 then 0,5,0
-    else if colour<0.64 then 1,5,1
-    else if colour<0.73 then 2,5,2
-    else if colour<0.82 then 3,5,3
-    else if colour<0.91 then 4,5,4
-    else 5,5,5
-  in
-  LTerm_style.index ((r * 6 + g) * 6 + b + 16)
-
-let print =
-  let print_cell cell () = match cell with
+  let print cell () = match cell with
     | None ->
       LTerm.prints LTerm_text.(eval [S "　"])
     | Some (code,colour) ->
@@ -98,25 +106,91 @@ let print =
           S (Format.sprintf "%s" utf8) ;
           E_fg ;
         ])
-  in
-  let print_line line () =
-    Array.fold_left (fun x cell -> x >>= print_cell cell)
+
+end
+
+module Line : sig
+
+  type t
+
+  val make : w:int -> t
+  val update_copy : t -> t -> unit
+  val print : t -> unit -> unit Lwt.t
+
+end = struct
+
+  type t = Cell.t array
+
+  let make ~w =
+    Array.init w (fun _ -> Cell.make ())
+
+  let update_copy old_line new_line =
+    let update_copy_cell key value =
+      Array.set new_line key @@ Cell.update value
+    in
+    Array.iteri update_copy_cell old_line
+
+  let print line () =
+    Array.fold_left (fun x cell -> x >>= Cell.print cell)
       (Lwt.return ()) line ;%lwt
     LTerm.printlf ""
-  in
-  let rec aux n () =
-    if n<h then begin
-      let n' = if n + !offset < h then n + !offset else n + !offset - h in
-      print_line (Array.get cells n') () >>= aux (n+1)
-    end else Lwt.return ()
-  in
-  (*
-  fun () -> LTerm.printlf "[%d]@." !offset >>= aux 0
-   *)
-  aux 0
+
+end
+
+module Matrix : sig
+
+  type t
+
+  val make : h:int -> w:int -> t
+  val step : t -> t
+  val print : t -> unit -> unit Lwt.t
+
+end = struct
+
+  type t = {
+    lines: Line.t array ;
+    old_offset : int ;
+    new_offset : int ;
+  }
+
+  let make ~h ~w = {
+    lines = Array.init h (fun _ -> Line.make ~w) ;
+    old_offset = 0 ;
+    new_offset = h-1 ;
+  }
+
+  let decr offset =
+    let new_offset = offset-1 in
+    if new_offset<0 then new_offset+h else new_offset
+
+  let step {lines;old_offset;new_offset} =
+    Line.update_copy
+      (Array.get lines old_offset)
+      (Array.get lines new_offset) ;
+    {
+      lines ;
+      old_offset = new_offset ;
+      new_offset = decr new_offset ;
+    }
+
+  let fold f {lines;old_offset;_} =
+    let rec aux n accum =
+      if n<h+old_offset then begin
+        let n' = if n < h then n else n - h in
+        f (Array.get lines n') accum >>= aux (n+1)
+      end else Lwt.return accum
+    in
+    fun seed -> aux old_offset seed
+
+  let print = fold Line.print
+
+end
 
 let () =
-  let rec aux () =
-    Lwt_unix.sleep frame_rate >>= step >>= print >>= aux
+  let rec aux matrix =
+    Lwt_unix.sleep frame_rate ;%lwt
+    let matrix = Matrix.step matrix in
+    Matrix.print matrix () ;%lwt
+    aux matrix
   in
-  aux () |> Lwt_main.run
+  Matrix.make ~w ~h |> aux |> Lwt_main.run
