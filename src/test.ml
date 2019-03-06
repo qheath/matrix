@@ -1,3 +1,5 @@
+open Lwt
+
 (*
 let h,w = 24,80
 let h,w = 15,50
@@ -6,44 +8,48 @@ let h,w = 26,39
 let frame_rate = 0.2
 let density = 0.01
 
-let utf8_of_code code =
-  let uchar = CamomileLibrary.UChar.of_int code in
-  CamomileLibrary.UTF8.init 1 (fun _ -> uchar)
+let () = Random.self_init ()
 
-let code_of_utf8 utf8 =
-  let uchar = CamomileLibrary.UTF8.get utf8 0 in
-  CamomileLibrary.UChar.int_of uchar
-
-module M = Map.Make(struct type t = int let compare = compare end)
-
-let pick =
-  Random.self_init () ;
-  let choices = [
+let default_code,pick_code =
+  let code_of_utf8 utf8 =
+    let uchar =
+      match Uutf.decode (Uutf.decoder (`String utf8)) with
+      | `Uchar c -> c
+      | _ -> assert false
+    in
+    Uchar.to_int uchar
+  and default_utf8 = "　"
+  and utf8_choices = [
     "０","９" ;
     "Ａ","Ｚ" ;
     "ａ","ｚ" ;
     "ぁ","ゖ" ;
     "ァ","ヺ" ;
   ] in
-  let map,_ =
-    let rec add map key value n =
-      if n>0 then
-        add (M.add key value map) (key+1) (value+1) (n-1)
-      else map,key
+  let default_code = code_of_utf8 default_utf8 in
+  let pick_code =
+    let module Codes =
+      Map.Make(struct type t = int let compare = compare end)
     in
-    let aux (map,sum) (low,high) =
-      let base_value = code_of_utf8 low in
-      let sub_sum = code_of_utf8 high - base_value + 1 in
-      add map sum base_value sub_sum
+    let map,_ =
+      let rec add map key code n =
+        if n>0 then
+          add (Codes.add key code map) (key+1) (code+1) (n-1)
+        else map,key
+      in
+      let aux (map,sum) (low_utf8,high_utf8) =
+        let low_code = code_of_utf8 low_utf8
+        and high_code = code_of_utf8 high_utf8 in
+        add map sum low_code (high_code - low_code + 1)
+      in
+      List.fold_left aux (Codes.empty,0) utf8_choices
     in
-    List.fold_left aux (M.empty,0) choices
+    fun () ->
+      match Codes.find_opt (Random.int (Codes.cardinal map)) map with
+      | None -> default_code
+      | Some c -> c
   in
-  fun () ->
-    let f = Random.float 1. in
-    let i = int_of_float (f *. (float_of_int (M.cardinal map))) in
-    match M.find_opt i map with
-    | None -> code_of_utf8 " "
-    | Some c -> c
+  default_code,pick_code
 
 module Cell : sig
 
@@ -51,7 +57,7 @@ module Cell : sig
 
   val make : unit -> t
   val update : t -> t
-  val to_markup : t -> LTerm_text.markup
+  val to_image : t -> Notty.I.t
 
 end = struct
 
@@ -59,19 +65,19 @@ end = struct
 
   let make () = None
 
-  let update = function
-    | Some (_,colour) ->
-      let colour = colour *. (0.82 +. Random.float 0.18) in
-      if colour>0.07 then Some (pick (),colour) else None
-    | None ->
-      if Random.float 1. < density
-      then Some (pick (),1.)
-      else None
+  let update cell =
+    if Random.float 1. < density
+    then Some (pick_code (),1.)
+    else match cell with
+      | Some (_,colour) ->
+        let colour = colour *. (0.82 +. Random.float 0.18) in
+        if colour>0.07 then Some (pick_code (),colour) else None
+      | None -> None
 
   let index colour =
     let point0,colour0 = Gg.V3.v 0. 0. 0., 0.
     and pcs = [
-      Gg.V3.v 0. 1. 0., 0.5 ;
+      Gg.V3.v 0. 1. 0., 0.3 ;
       Gg.V3.v 1. 1. 1., 1. ;
     ] in
     let r,g,b =
@@ -92,18 +98,16 @@ end = struct
       else if y>255 then 255
       else y
     in
-    LTerm_style.rgb (cap r) (cap g) (cap b)
+    Notty.A.rgb_888 ~r:(cap r) ~g:(cap g) ~b:(cap b)
 
-  let to_markup = function
-    | None ->
-      LTerm_text.([S "　"])
-    | Some (code,colour) ->
-      let utf8 = utf8_of_code code in
-      LTerm_text.([
-          B_fg (index colour) ;
-          S (Format.sprintf "%s" utf8) ;
-          E_fg ;
-        ])
+  let to_image cell =
+    let attr,code = match cell with
+      | None ->
+        Notty.A.empty,default_code
+      | Some (code,colour) ->
+        (Notty.A.fg @@ index colour),code
+    in
+    Notty.I.uchar attr (Uchar.of_int code) 1 1
 
 end
 
@@ -113,7 +117,7 @@ module Line : sig
 
   val make : w:int -> t
   val update_copy : t -> t -> unit
-  val to_markup : t -> LTerm_text.markup
+  val to_image : t -> Notty.I.t
 
 end = struct
 
@@ -128,10 +132,8 @@ end = struct
     in
     Array.iteri update_copy_cell old_line
 
-  let to_markup =
-    let aux accum cell = List.rev_append (Cell.to_markup cell) accum in
-    fun line ->
-      List.rev @@ ((LTerm_text.S "\n") :: Array.fold_left aux [] line)
+  let to_image line =
+    Notty.I.tabulate w 1 (fun i _ -> Cell.to_image line.(i))
 
 end
 
@@ -141,7 +143,7 @@ module Matrix : sig
 
   val make : h:int -> w:int -> t
   val step : t -> t
-  val to_markup : t -> LTerm_text.markup
+  val to_image : t -> Notty.I.t
 
 end = struct
 
@@ -171,26 +173,46 @@ end = struct
       new_offset = decr new_offset ;
     }
 
-  let fold f {lines;old_offset;_} =
-    let rec aux n accum =
-      if n<h+old_offset then begin
-        let n' = if n < h then n else n - h in
-        f (Array.get lines n') accum |> aux (n+1)
-      end else accum
+  let to_image {lines;old_offset;_} =
+    let aux _ i =
+      let i' = i + old_offset in
+      Line.to_image lines.(if i'<h then i' else i'-h)
     in
-    fun seed -> aux old_offset seed
-
-  let to_markup =
-    let aux line accum = List.rev_append (Line.to_markup line) accum in
-    fun matrix -> fold aux matrix []
+    Notty.I.tabulate 1 h aux |> Notty_lwt.eol
+    |> Notty_lwt.eol
 
 end
 
-let () =
-  let rec aux matrix =
-    Matrix.to_markup matrix |> List.rev |> LTerm_text.eval |> LTerm.prints ;%lwt
+let end_time = Unix.time () +. 3.
+let end_ts = 100
+
+let init () =
+  let matrix = Matrix.make ~w ~h in
+  let term = Notty_lwt.Term.create () in
+  Lwt.return (term,matrix)
+
+let close term =
+  Notty_lwt.Term.release term ;%lwt
+  Lwt.return ()
+
+let run (term,matrix) =
+  let rec aux ts (matrix) =
+    (*
+  let events = Notty_lwt.Term.events term in
+    begin match%lwt Lwt_stream.get events with
+      | None -> Lwt.return ()
+      | Some _ -> Lwt.return ()
+    end ;%lwt
+     *)
+    Matrix.to_image matrix |> Notty_lwt.Term.image term ;%lwt
     Lwt_unix.sleep frame_rate ;%lwt
-    let matrix = Matrix.step matrix in
-    aux matrix
+    (*
+     *)
+    if Unix.time () > end_time || ts > end_ts
+    then Lwt.return term
+    else (Matrix.step matrix) |> aux (ts+1)
   in
-  Matrix.make ~w ~h |> aux |> Lwt_main.run
+  aux 0 (matrix)
+
+let () =
+  init () >>= run >>= close |> Lwt_main.run

@@ -1,6 +1,6 @@
 (executable
  (name test)
- (libraries unix camomile lambda-term gg)
+ (libraries unix camomile notty notty.lwt gg)
  (modules ("Test"))
  (preprocess (pps lwt_ppx))
  )
