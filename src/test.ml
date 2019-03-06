@@ -1,16 +1,18 @@
 open Lwt
 
-(*
-let h,w = 24,80
-let h,w = 15,50
- *)
-let h,w = 26,39
-let frame_rate = 0.2
-let density = 0.01
-
 let () = Random.self_init ()
 
-let default_code,pick_code =
+module Code : sig
+
+  type t
+
+  val pick : unit -> t
+  val opt_to_uchar : t option -> Uchar.t
+
+end = struct
+
+  type t = int
+
   let code_of_utf8 utf8 =
     let uchar =
       match Uutf.decode (Uutf.decoder (`String utf8)) with
@@ -18,16 +20,10 @@ let default_code,pick_code =
       | _ -> assert false
     in
     Uchar.to_int uchar
-  and default_utf8 = "　"
-  and utf8_choices = [
-    "０","９" ;
-    "Ａ","Ｚ" ;
-    "ａ","ｚ" ;
-    "ぁ","ゖ" ;
-    "ァ","ヺ" ;
-  ] in
-  let default_code = code_of_utf8 default_utf8 in
-  let pick_code =
+
+  let default = code_of_utf8 "　"
+
+  let pick =
     let module Codes =
       Map.Make(struct type t = int let compare = compare end)
     in
@@ -42,36 +38,49 @@ let default_code,pick_code =
         and high_code = code_of_utf8 high_utf8 in
         add map sum low_code (high_code - low_code + 1)
       in
-      List.fold_left aux (Codes.empty,0) utf8_choices
+      List.fold_left aux (Codes.empty,0) [
+        "０","９" ;
+        "Ａ","Ｚ" ;
+        "ａ","ｚ" ;
+        "ぁ","ゖ" ;
+        "ァ","ヺ" ;
+      ]
     in
     fun () ->
       match Codes.find_opt (Random.int (Codes.cardinal map)) map with
-      | None -> default_code
+      | None -> default
       | Some c -> c
-  in
-  default_code,pick_code
+
+  let opt_to_uchar code_opt =
+    let code = match code_opt with
+      | Some code -> code
+      | None -> default
+    in
+    Uchar.of_int code
+
+end
 
 module Cell : sig
 
   type t
 
   val make : unit -> t
-  val update : t -> t
+  val update : density:float -> t -> t
   val to_image : t -> Notty.I.t
 
 end = struct
 
-  type t = (int * float) option
+  type t = (Code.t * float) option
 
   let make () = None
 
-  let update cell =
+  let update ~density cell =
     if Random.float 1. < density
-    then Some (pick_code (),1.)
+    then Some (Code.pick (),1.)
     else match cell with
       | Some (_,colour) ->
         let colour = colour *. (0.82 +. Random.float 0.18) in
-        if colour>0.07 then Some (pick_code (),colour) else None
+        if colour>0.07 then Some (Code.pick (),colour) else None
       | None -> None
 
   let index colour =
@@ -103,11 +112,11 @@ end = struct
   let to_image cell =
     let attr,code = match cell with
       | None ->
-        Notty.A.empty,default_code
+        Notty.A.empty,None
       | Some (code,colour) ->
-        (Notty.A.fg @@ index colour),code
+        (Notty.A.fg @@ index colour),Some code
     in
-    Notty.I.uchar attr (Uchar.of_int code) 1 1
+    Notty.I.uchar attr (Code.opt_to_uchar code) 1 1
 
 end
 
@@ -116,8 +125,8 @@ module Line : sig
   type t
 
   val make : w:int -> t
-  val update_copy : t -> t -> unit
-  val to_image : t -> Notty.I.t
+  val update_copy : density:float -> t -> t -> unit
+  val to_image : w:int -> t -> Notty.I.t
 
 end = struct
 
@@ -126,13 +135,13 @@ end = struct
   let make ~w =
     Array.init w (fun _ -> Cell.make ())
 
-  let update_copy old_line new_line =
+  let update_copy ~density old_line new_line =
     let update_copy_cell key value =
-      Array.set new_line key @@ Cell.update value
+      Array.set new_line key @@ Cell.update ~density value
     in
     Array.iteri update_copy_cell old_line
 
-  let to_image line =
+  let to_image ~w line =
     Notty.I.tabulate w 1 (fun i _ -> Cell.to_image line.(i))
 
 end
@@ -142,8 +151,8 @@ module Matrix : sig
   type t
 
   val make : h:int -> w:int -> t
-  val step : t -> t
-  val to_image : t -> Notty.I.t
+  val step : h:int -> density:float -> t -> t
+  val to_image : w:int -> h:int -> t -> Notty.I.t
 
 end = struct
 
@@ -159,60 +168,141 @@ end = struct
     new_offset = h-1 ;
   }
 
-  let decr offset =
-    let new_offset = offset-1 in
-    if new_offset<0 then new_offset+h else new_offset
-
-  let step {lines;old_offset;new_offset} =
+  let step ~h ~density {lines;old_offset;new_offset} =
     Line.update_copy
+      ~density
       (Array.get lines old_offset)
       (Array.get lines new_offset) ;
     {
       lines ;
       old_offset = new_offset ;
-      new_offset = decr new_offset ;
+      new_offset =
+        let new_new_offset = new_offset-1 in
+        if new_new_offset<0 then new_new_offset+h else new_new_offset ;
     }
 
-  let to_image {lines;old_offset;_} =
+  let to_image ~w ~h {lines;old_offset;_} =
     let aux _ i =
       let i' = i + old_offset in
-      Line.to_image lines.(if i'<h then i' else i'-h)
+      Line.to_image ~w lines.(if i'<h then i' else i'-h)
     in
     Notty.I.tabulate 1 h aux |> Notty_lwt.eol
     |> Notty_lwt.eol
 
 end
 
-let end_time = Unix.time () +. 3.
-let end_ts = 100
+module Event : sig
 
-let init () =
-  let matrix = Matrix.make ~w ~h in
-  let term = Notty_lwt.Term.create () in
-  Lwt.return (term,matrix)
+  type t
+  type stream
 
-let close term =
-  Notty_lwt.Term.release term ;%lwt
-  Lwt.return ()
+  val stream_of_term : Notty_lwt.Term.t -> stream
+  val pop : stream -> (t * stream) option
+  val handle : t -> unit
 
-let run (term,matrix) =
-  let rec aux ts (matrix) =
-    (*
-  let events = Notty_lwt.Term.events term in
-    begin match%lwt Lwt_stream.get events with
-      | None -> Lwt.return ()
-      | Some _ -> Lwt.return ()
-    end ;%lwt
-     *)
-    Matrix.to_image matrix |> Notty_lwt.Term.image term ;%lwt
-    Lwt_unix.sleep frame_rate ;%lwt
-    (*
-     *)
+end = struct
+
+  type t = [
+    | `Key of Notty.Unescape.key
+    | `Mouse of Notty.Unescape.mouse
+    | `Paste of Notty.Unescape.paste
+    | `Resize of int * int
+  ]
+
+  type stream = t list * t Lwt_stream.t
+
+  let stream_of_term term =
+    [],Notty_lwt.Term.events term
+
+  let pop (event_list,event_stream) =
+    match
+      match event_list with
+      | event::event_list -> Some (event,event_list)
+      | [] ->
+        match Lwt_stream.get_available event_stream with
+        | event::event_list -> Some (event,event_list)
+        | [] -> None
+    with
+    | None -> None
+    | Some (event,event_list) ->
+      Some (event,(event_list,event_stream))
+
+  let handle _event =
+    ()
+
+end
+
+module Status : sig
+
+  type t
+
+  val init : unit -> t Lwt.t
+  val display : t -> unit Lwt.t
+  val update : t -> t
+  val close : t -> unit Lwt.t
+
+end = struct
+
+  type t = {
+    term : Notty_lwt.Term.t ;
+    events : Event.stream ;
+    w : int ;
+    h : int ;
+    matrix : Matrix.t ;
+    frame_rate : float ;
+    density : float ;
+  }
+
+  let init () =
+    let term = Notty_lwt.Term.create () in
+    let events = Event.stream_of_term term in
+    let w,h = 90,50 in
+    let matrix = Matrix.make ~w ~h in
+    let frame_rate = 0.1
+    and density = 0.01 in
+    Lwt.return {
+      term ;
+      events ;
+      w ;
+      h ;
+      matrix ;
+      frame_rate ;
+      density ;
+    }
+
+  let display {term;w;h;matrix;frame_rate;_} =
+    Matrix.to_image ~w ~h matrix |> Notty_lwt.Term.image term ;%lwt
+    Lwt_unix.sleep frame_rate
+
+  let update status =
+    let status = match Event.pop status.events with
+      | None -> status
+      | Some (_event,events) ->
+        { status with events = events }
+    in
+    { status with
+      matrix =
+        Matrix.step ~h:status.h ~density:status.density status.matrix ;
+    }
+
+  let close {term;_} =
+    Notty_lwt.Term.release term ;%lwt
+    Lwt.return ()
+
+end
+
+let end_time = Unix.time () +. 30.
+let end_ts = 10
+
+let run =
+  let rec aux ts status =
+    Status.display status ;%lwt
+    let status = Status.update status in
     if Unix.time () > end_time || ts > end_ts
-    then Lwt.return term
-    else (Matrix.step matrix) |> aux (ts+1)
+    then Lwt.return status
+    else aux (ts+1) status
   in
-  aux 0 (matrix)
+  aux 0
 
 let () =
-  init () >>= run >>= close |> Lwt_main.run
+  Status.init () >>= run >>= Status.close |> Lwt_main.run
