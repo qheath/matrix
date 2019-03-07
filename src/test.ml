@@ -191,14 +191,77 @@ end = struct
 
 end
 
-module Event : sig
+module type Counter = sig
 
   type t
+
+  val make : ?lambda:float -> float -> t
+  val incr : t -> t
+  val decr : t -> t
+  val get : t -> float
+
+end
+
+module BoundedCounter : Counter = struct
+
+  type t = {
+    fold : float -> float ;
+    unfolded_value : float ;
+    folded_value : float ;
+  }
+
+  let make ?(lambda=1.) folded_value = {
+    fold = (fun x -> 1. /. (1. +. exp (-. lambda *. x))) ;
+    unfolded_value = -. log (1. /. folded_value -. 1.) /. lambda ;
+    folded_value ;
+  }
+
+  let incr {fold;unfolded_value;_} =
+    let unfolded_value = unfolded_value +. 1. in
+    let folded_value = fold unfolded_value in
+    { fold ; unfolded_value ; folded_value }
+
+  let decr {fold;unfolded_value;_} =
+    let unfolded_value = unfolded_value -. 1. in
+    let folded_value = fold unfolded_value in
+    { fold ; unfolded_value ; folded_value }
+
+  let get {folded_value;_} = folded_value
+
+end
+
+module UnboundedCounter : Counter = struct
+
+  type t = {
+    lambda : float ;
+    value : float ;
+  }
+
+  let make ?(lambda=2.) value =
+    { lambda ; value }
+
+  let incr {lambda;value} =
+    { lambda ; value = value *. lambda }
+
+  let decr {lambda;value} =
+    { lambda ; value = value /. lambda }
+
+  let get {value;_} = value
+
+end
+
+module Event : sig
+
+  type t = [
+    | `Key of Notty.Unescape.key
+    | `Mouse of Notty.Unescape.mouse
+    | `Paste of Notty.Unescape.paste
+    | `Resize of int * int
+  ]
   type stream
 
   val stream_of_term : Notty_lwt.Term.t -> stream
   val pop : stream -> (t * stream) option
-  val handle : t -> unit
 
 end = struct
 
@@ -227,9 +290,6 @@ end = struct
     | Some (event,event_list) ->
       Some (event,(event_list,event_stream))
 
-  let handle _event =
-    ()
-
 end
 
 module Status : sig
@@ -238,7 +298,7 @@ module Status : sig
 
   val init : unit -> t Lwt.t
   val display : t -> unit Lwt.t
-  val update : t -> t
+  val update : t -> t option
   val close : t -> unit Lwt.t
 
 end = struct
@@ -249,8 +309,9 @@ end = struct
     w : int ;
     h : int ;
     matrix : Matrix.t ;
-    frame_rate : float ;
-    density : float ;
+    frame_rate : UnboundedCounter.t ;
+    density : BoundedCounter.t ;
+    ts : int ;
   }
 
   let init () =
@@ -258,8 +319,9 @@ end = struct
     let events = Event.stream_of_term term in
     let w,h = 90,50 in
     let matrix = Matrix.make ~w ~h in
-    let frame_rate = 0.1
-    and density = 0.01 in
+    let frame_rate = UnboundedCounter.make ~lambda:2. 0.1
+    and density = BoundedCounter.make ~lambda:0.1 0.01
+    and ts = 0 in
     Lwt.return {
       term ;
       events ;
@@ -268,22 +330,46 @@ end = struct
       matrix ;
       frame_rate ;
       density ;
+      ts ;
     }
 
   let display {term;w;h;matrix;frame_rate;_} =
     Matrix.to_image ~w ~h matrix |> Notty_lwt.Term.image term ;%lwt
-    Lwt_unix.sleep frame_rate
+    Lwt_unix.sleep @@ UnboundedCounter.get frame_rate
+
+  let end_ts = max_int
 
   let update status =
-    let status = match Event.pop status.events with
-      | None -> status
-      | Some (_event,events) ->
-        { status with events = events }
+    let status =
+      { status with
+        matrix =
+          Matrix.step ~h:status.h ~density:(BoundedCounter.get status.density) status.matrix ;
+        ts = status.ts + 1 ;
+      }
     in
-    { status with
-      matrix =
-        Matrix.step ~h:status.h ~density:status.density status.matrix ;
-    }
+    if status.ts > end_ts then None
+    else match Event.pop status.events with
+      | None -> Some status
+      | Some (event,events) ->
+        let status = { status with events = events } in
+        match event with
+        | `Key key ->
+          begin match key with
+            | `Arrow arrow,_ ->
+              begin match arrow with
+                | `Up -> Some { status with
+                                frame_rate = UnboundedCounter.incr status.frame_rate }
+                | `Down -> Some { status with
+                                  frame_rate = UnboundedCounter.decr status.frame_rate }
+                | `Left -> Some { status with
+                                  density = BoundedCounter.decr status.density }
+                | `Right -> Some { status with
+                                   density = BoundedCounter.incr status.density }
+              end
+            | _ -> None
+          end
+        | `Paste _ | `Mouse _ -> Some status
+        | `Resize _ -> None
 
   let close {term;_} =
     Notty_lwt.Term.release term ;%lwt
@@ -291,18 +377,14 @@ end = struct
 
 end
 
-let end_time = Unix.time () +. 30.
-let end_ts = 10
-
 let run =
-  let rec aux ts status =
+  let rec aux status =
     Status.display status ;%lwt
-    let status = Status.update status in
-    if Unix.time () > end_time || ts > end_ts
-    then Lwt.return status
-    else aux (ts+1) status
+    match Status.update status with
+    | Some status -> aux status
+    | None -> Lwt.return status
   in
-  aux 0
+  aux
 
 let () =
   Status.init () >>= run >>= Status.close |> Lwt_main.run
