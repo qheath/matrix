@@ -269,16 +269,21 @@ end
 
 module Event : sig
 
-  type t = [
-    | `Key of Notty.Unescape.key
-    | `Mouse of Notty.Unescape.mouse
-    | `Paste of Notty.Unescape.paste
-    | `Resize of int * int
-  ]
+  type t
   type stream
+  type action = [
+    | `Up
+    | `Down
+    | `Left
+    | `Right
+    | `Quit
+    | `Resize of int * int
+    | `Ignore
+  ]
 
   val stream_of_term : Notty_lwt.Term.t -> stream
   val pop : stream -> (t * stream) option
+  val interpret : t -> action
 
 end = struct
 
@@ -290,6 +295,16 @@ end = struct
   ]
 
   type stream = t list * t Lwt_stream.t
+
+  type action = [
+    | `Up
+    | `Down
+    | `Left
+    | `Right
+    | `Quit
+    | `Resize of int * int
+    | `Ignore
+  ]
 
   let stream_of_term term =
     [],Notty_lwt.Term.events term
@@ -306,6 +321,21 @@ end = struct
     | None -> None
     | Some (event,event_list) ->
       Some (event,(event_list,event_stream))
+
+  let interpret = function
+    | `Key key ->
+      begin match key with
+        | `Arrow arrow,_ ->
+          begin match arrow with
+            | `Up -> `Up
+            | `Down -> `Down
+            | `Left -> `Left
+            | `Right -> `Right
+          end
+        | _ -> `Quit
+      end
+    | `Resize (w,h) -> `Resize (w,h)
+    | `Paste _ | `Mouse _ -> `Ignore
 
 end
 
@@ -370,24 +400,18 @@ end = struct
       | None -> Some status
       | Some (event,events) ->
         let status = { status with events = events } in
-        match event with
-        | `Key key ->
-          begin match key with
-            | `Arrow arrow,_ ->
-              begin match arrow with
-                | `Up -> Some { status with
-                                frame_rate = UnboundedCounter.incr status.frame_rate }
-                | `Down -> Some { status with
-                                  frame_rate = UnboundedCounter.decr status.frame_rate }
-                | `Left -> Some { status with
-                                  density = BoundedCounter.decr status.density }
-                | `Right -> Some { status with
-                                   density = BoundedCounter.incr status.density }
-              end
-            | _ -> None
-          end
+        match Event.interpret event with
+        | `Up -> Some { status with
+                        frame_rate = UnboundedCounter.incr status.frame_rate }
+        | `Down -> Some { status with
+                          frame_rate = UnboundedCounter.decr status.frame_rate }
+        | `Left -> Some { status with
+                          density = BoundedCounter.decr status.density }
+        | `Right -> Some { status with
+                           density = BoundedCounter.incr status.density }
+        | `Quit -> None
         | `Resize (w,h) -> Some { status with w = w/2 ; h = h }
-        | `Paste _ | `Mouse _ -> Some status
+        | `Ignore -> Some status
 
   let close {term;_} =
     Notty_lwt.Term.release term ;%lwt
