@@ -79,8 +79,8 @@ end = struct
     then Some (Code.pick (),1.)
     else match cell with
       | Some (_,colour) ->
-        let colour = colour *. (0.82 +. Random.float 0.18) in
-        if colour>0.07 then Some (Code.pick (),colour) else None
+        let colour = colour *. (0.85 +. Random.float 0.15) in
+        if colour>0.01 then Some (Code.pick (),colour) else None
       | None -> None
 
   let index colour =
@@ -136,8 +136,19 @@ end = struct
     Array.init w (fun _ -> Cell.make ())
 
   let update_copy ~density old_line new_line =
-    let update_copy_cell key value =
-      Array.set new_line key @@ Cell.update ~density value
+    let rand = Random.float 1. in
+    let update_copy_cell =
+      if rand<0.02 then
+        (fun key value ->
+           let key = if key>0 then key-1 else Array.length new_line - 1 in
+           Array.set new_line key @@ Cell.update ~density value)
+      else if rand<0.04 then
+        (fun key value ->
+           let key = if key<Array.length new_line - 1 then key+1 else 0 in
+           Array.set new_line key @@ Cell.update ~density value)
+      else
+        (fun key value ->
+           Array.set new_line key @@ Cell.update ~density value)
     in
     Array.iteri update_copy_cell old_line
 
@@ -319,7 +330,7 @@ end = struct
     let events = Event.stream_of_term term in
     let w,h = 90,50 in
     let matrix = Matrix.make ~w ~h in
-    let frame_rate = UnboundedCounter.make ~lambda:2. 0.1
+    let frame_rate = UnboundedCounter.make ~lambda:2. 0.05
     and density = BoundedCounter.make ~lambda:0.1 0.01
     and ts = 0 in
     Lwt.return {
