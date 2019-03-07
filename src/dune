@@ -1,6 +1,13 @@
 (executable
  (name test)
- (libraries unix camomile notty notty.lwt gg)
+ (libraries unix notty notty.lwt gg)
  (modules ("Test"))
+ (preprocess (pps lwt_ppx))
+ )
+
+(executable
+ (name tast)
+ (libraries unix notty notty.lwt gg)
+ (modules ("Tast"))
  (preprocess (pps lwt_ppx))
  )
