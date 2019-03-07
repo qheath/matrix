@@ -127,6 +127,7 @@ module Line : sig
   val make : w:int -> t
   val update_copy : w:int -> density:float -> t -> t -> unit
   val to_image : w:int -> t -> Notty.I.t
+  val adapt : w:int -> t -> t
 
 end = struct
 
@@ -162,6 +163,14 @@ end = struct
       with _ -> failwith (Format.sprintf "%d/%d" i (Array.length line))
       )
 
+  let adapt ~w line =
+    if w > Array.length line then
+      let aux i =
+        if i<Array.length line then line.(i) else Cell.make ()
+      in
+      Array.init w aux
+    else line
+
 end
 
 module Matrix : sig
@@ -171,6 +180,7 @@ module Matrix : sig
   val make : h:int -> w:int -> t
   val step : w:int -> h:int -> density:float -> t -> t
   val to_image : w:int -> h:int -> t -> Notty.I.t
+  val adapt : w:int -> h:int -> t -> t
 
 end = struct
 
@@ -205,6 +215,18 @@ end = struct
       Line.to_image ~w lines.(if i'<h then i' else i'-h)
     in
     Notty.I.tabulate 1 h aux |> Notty_lwt.eol |> Notty_lwt.eol
+
+  let adapt ~w ~h {lines;old_offset;new_offset} =
+    let lines = Array.map (Line.adapt ~w) lines in
+    let lines =
+      if h > Array.length lines then
+        let aux i =
+          if i<Array.length lines then lines.(i) else Line.make ~w
+        in
+        Array.init h aux
+      else lines
+    in
+    {lines;old_offset;new_offset}
 
 end
 
@@ -368,7 +390,7 @@ end = struct
     let w,h = w_term/2,h_term in
     let matrix = Matrix.make ~w ~h in
     let frame_rate = UnboundedCounter.make ~lambda:2. 0.05
-    and density = BoundedCounter.make ~lambda:0.1 0.01
+    and density = BoundedCounter.make ~lambda:0.3 0.01
     and ts = 0 in
     Lwt.return {
       term ;
@@ -410,7 +432,10 @@ end = struct
         | `Right -> Some { status with
                            density = BoundedCounter.incr status.density }
         | `Quit -> None
-        | `Resize (w,h) -> Some { status with w = w/2 ; h = h }
+        | `Resize (w_term,h_term) ->
+          let w = w_term/2 and h = h_term in
+          let matrix = Matrix.adapt ~w ~h status.matrix in
+          Some { status with matrix ; w ; h }
         | `Ignore -> Some status
 
   let close {term;_} =
