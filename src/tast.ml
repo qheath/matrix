@@ -2,12 +2,65 @@ open Lwt
 
 let () = Random.self_init ()
 
+module Colour : sig
+
+  type t
+
+  val make : unit -> t
+  val update : density:float -> t -> t
+  val to_attr : t -> Notty.A.t
+
+end = struct
+
+  type t = float option
+
+  let make () = None
+
+  let update ~density colour =
+    if Random.float 1. < density
+    then Some 1.
+    else match colour with
+      | Some level ->
+        let level = level *. (0.85 +. Random.float 0.15) in
+        if level>0.01 then Some level else None
+      | None -> None
+
+  let to_attr = function
+    | None -> Notty.A.fg Notty.A.lightblack
+    | Some level ->
+      let point0,level0 = Gg.V3.v 0. 0. 0., 0.
+      and pcs = [
+        Gg.V3.v 0. 1. 0., 0.3 ;
+        Gg.V3.v 1. 1. 1., 1. ;
+      ] in
+      let r,g,b =
+        let point =
+          let rec aux (point0,level0) = function
+            | [] -> point0
+            | (point1,level1 as pc1)::l ->
+              if level<level1 then Gg.V3.mix point0 point1 ((level-.level0)/.(level1-.level0))
+              else aux pc1 l
+          in
+          if level<level0 then point0
+          else aux (point0,level0) pcs
+        in
+        Gg.V3.to_tuple point
+      and cap x =
+        let y = int_of_float @@ x *. 256. in
+        if y<0 then 0
+        else if y>255 then 255
+        else y
+      in
+      Notty.A.fg @@ Notty.A.rgb_888 ~r:(cap r) ~g:(cap g) ~b:(cap b)
+
+end
+
 module Code : sig
 
   type t
 
   val pick : unit -> t
-  val opt_to_uchar : t option -> Uchar.t
+  val to_uchar : t -> Uchar.t
 
 end = struct
 
@@ -51,11 +104,7 @@ end = struct
       | None -> default
       | Some c -> c
 
-  let opt_to_uchar code_opt =
-    let code = match code_opt with
-      | Some code -> code
-      | None -> default
-    in
+  let to_uchar code =
     Uchar.of_int code
 
 end
@@ -66,57 +115,97 @@ module Cell : sig
 
   val make : unit -> t
   val update : density:float -> t -> t
+  val merge : t -> t -> t
   val to_image : t -> Notty.I.t
 
 end = struct
 
-  type t = (Code.t * float) option
+  type t = Code.t * Colour.t
 
-  let make () = None
+  let make () = Code.pick (),Colour.make ()
 
-  let update ~density cell =
-    if Random.float 1. < density
-    then Some (Code.pick (),1.)
-    else match cell with
-      | Some (_,colour) ->
-        let colour = colour *. (0.85 +. Random.float 0.15) in
-        if colour>0.01 then Some (Code.pick (),colour) else None
-      | None -> None
+  let update ~density (code,colour) =
+    code,(Colour.update ~density colour)
 
-  let index colour =
-    let point0,colour0 = Gg.V3.v 0. 0. 0., 0.
-    and pcs = [
-      Gg.V3.v 0. 1. 0., 0.3 ;
-      Gg.V3.v 1. 1. 1., 1. ;
-    ] in
-    let r,g,b =
-      let point =
-        let rec aux (point0,colour0) = function
-          | [] -> point0
-          | (point1,colour1 as pc1)::l ->
-            if colour<colour1 then Gg.V3.mix point0 point1 ((colour-.colour0)/.(colour1-.colour0))
-            else aux pc1 l
-        in
-        if colour<colour0 then point0
-        else aux (point0,colour0) pcs
-      in
-      Gg.V3.to_tuple point
-    and cap x =
-      let y = int_of_float @@ x *. 256. in
-      if y<0 then 0
-      else if y>255 then 255
-      else y
+  let merge (code,_) (_,colour) = code,colour
+
+  let to_image (code,colour) =
+    Notty.I.uchar (Colour.to_attr colour) (Code.to_uchar code) 1 1
+
+end
+
+let iteri length f a =
+  let rec aux i =
+    if i>=0 then begin
+      f i a.(i) ;
+      aux (i-1)
+    end
+  in
+  aux (length-1)
+
+let expand old_length new_length f a =
+  if new_length < old_length then begin
+    for i=new_length to old_length-1 do
+      a.(i) <- f ()
+    done ;
+    a
+  end else if new_length > Array.length a then begin
+    let aux i =
+      if i < Array.length a then a.(i) else f ()
     in
-    Notty.A.rgb_888 ~r:(cap r) ~g:(cap g) ~b:(cap b)
+    Array.init new_length aux
+  end else a
 
-  let to_image cell =
-    let attr,code = match cell with
-      | None ->
-        Notty.A.empty,None
-      | Some (code,colour) ->
-        (Notty.A.fg @@ index colour),Some code
+module Line : sig
+
+  type t
+
+  val make : w:int -> t
+  val update : w:int -> wind_speed:float -> density:float -> t -> unit
+  val merge : w:int -> t -> t -> unit
+  val to_image : t -> int -> Notty.I.t
+  val adapt : w0:int -> w1:int -> t -> t
+
+end = struct
+
+  type t = Cell.t array
+
+  let make ~w =
+    Array.init w (fun _ -> Cell.make ())
+
+  let update ~w ~wind_speed ~density line =
+    let rand = Random.float 1. in
+    ignore rand ;
+    ignore wind_speed ;
+    let temp = make ~w in
+    let aux j cell = temp.(j) <- Cell.update ~density cell in
+    iteri w aux line ;
+    let aux =
+      if rand<wind_speed then
+        (fun j cell ->
+           let j = if j>0 then j-1 else w-1 in
+           line.(j) <- Cell.update ~density cell)
+      else if rand<wind_speed*.2. then
+        (fun j cell ->
+           let j = if j<w-1 then j+1 else 0 in
+           line.(j) <- Cell.update ~density cell)
+      else
+        (fun j cell ->
+           line.(j) <- Cell.update ~density cell)
     in
-    Notty.I.uchar attr (Code.opt_to_uchar code) 1 1
+    Array.iteri aux temp
+
+  let merge ~w line_code line_colour =
+    let aux j cell =
+      line_code.(j) <- Cell.merge line_code.(j) cell
+    in
+    iteri w aux line_colour
+
+  let to_image line j =
+    Cell.to_image line.(j)
+
+  let adapt ~w0 ~w1 line =
+    expand w0 w1 Cell.make line
 
 end
 
@@ -125,80 +214,32 @@ module Matrix : sig
   type t
 
   val make : h:int -> w:int -> t
-  val step : w:int -> h:int -> density:float -> t -> t
+  val step : w:int -> h:int -> wind_speed:float -> density:float -> t -> unit
   val to_image : w:int -> h:int -> t -> Notty.I.t
-  val adapt : w:int -> h:int -> t -> t
+  val adapt : w0:int -> h0:int -> w1:int -> h1:int -> t -> t
 
 end = struct
 
-  type t = {
-    lines : Cell.t array array ;
-    old_offset : int ;
-    new_offset : int ;
-  }
+  type t = Line.t array
 
-  let make ~h ~w = {
-    lines = Array.init h (fun _ -> Array.init w (fun _ -> Cell.make ())) ;
-    old_offset = 0 ;
-    new_offset = h-1 ;
-  }
+  let make ~h ~w =
+    Array.init h (fun _ -> Line.make ~w)
 
-  let step ~w ~h ~density {lines;old_offset;new_offset} =
-    let rand = Random.float 1. in
-    let set = Array.set @@ Array.get lines new_offset in
-    let update_copy_cell =
-      if rand<0.015 then
-        (fun key value ->
-           if key<w then
-             let key = if key>0 then key-1 else w-1 in
-             set key @@ Cell.update ~density value)
-      else if rand<0.03 then
-        (fun key value ->
-           if key<w then
-             let key = if key<w-1 then key+1 else 0 in
-             set key @@ Cell.update ~density value)
-      else
-        (fun key value ->
-           if key<w then
-             set key @@ Cell.update ~density value)
+  let step ~w ~h ~wind_speed ~density lines =
+    let aux i line =
+      if i>0
+      then Line.merge ~w line lines.(i-1)
+      else Line.update ~w ~wind_speed ~density line
     in
-    Array.iteri update_copy_cell (Array.get lines old_offset) ;
-    {
-      lines ;
-      old_offset = new_offset ;
-      new_offset =
-        let new_new_offset = new_offset-1 in
-        if new_new_offset<0 then new_new_offset+h else new_new_offset ;
-    }
+    iteri h aux lines
 
-  let to_image ~w ~h {lines;old_offset;_} =
-    let aux _ i =
-      let i' = i + old_offset in
-      Notty.I.tabulate w 1
-        (fun i _ -> Cell.to_image lines.(if i'<h then i' else i'-h).(i))
-    in
-    Notty.I.tabulate 1 h aux |> Notty_lwt.eol |> Notty_lwt.eol
+  let to_image ~w ~h lines =
+    let aux j i = Line.to_image lines.(i) j in
+    Notty.I.tabulate w h aux
 
-  let adapt ~w ~h {lines;old_offset;new_offset} =
-    let adapt_line line =
-      if w > Array.length line then
-        let aux i =
-          if i<Array.length line then line.(i) else Cell.make ()
-        in
-        Array.init w aux
-      else line
-    in
-    let lines = Array.map adapt_line lines in
-    let lines =
-      if h > Array.length lines then
-        let aux i =
-          if i<Array.length lines then lines.(i)
-          else Array.init w (fun _ -> Cell.make ())
-        in
-        Array.init h aux
-      else lines
-    in
-    {lines;old_offset;new_offset}
+  let adapt ~w0 ~h0 ~w1 ~h1 lines =
+    Array.map (Line.adapt ~w0 ~w1) lines
+    |> expand h0 h1 (fun () -> Line.make ~w:w1)
 
 end
 
@@ -266,6 +307,8 @@ module Event : sig
   type t
   type stream
   type action = [
+    | `PageUp
+    | `PageDown
     | `Up
     | `Down
     | `Left
@@ -291,6 +334,8 @@ end = struct
   type stream = t list * t Lwt_stream.t
 
   type action = [
+    | `PageUp
+    | `PageDown
     | `Up
     | `Down
     | `Left
@@ -319,6 +364,11 @@ end = struct
   let interpret = function
     | `Key key ->
       begin match key with
+        | `Page page,_ ->
+          begin match page with
+            | `Up -> `PageUp
+            | `Down -> `PageDown
+          end
         | `Arrow arrow,_ ->
           begin match arrow with
             | `Up -> `Up
@@ -350,6 +400,7 @@ end = struct
     w : int ;
     h : int ;
     matrix : Matrix.t ;
+    wind_speed : UnboundedCounter.t ;
     frame_rate : UnboundedCounter.t ;
     density : BoundedCounter.t ;
     ts : int ;
@@ -361,7 +412,8 @@ end = struct
     let w_term,h_term = Notty_lwt.Term.size term in
     let w,h = w_term/2,h_term in
     let matrix = Matrix.make ~w ~h in
-    let frame_rate = UnboundedCounter.make ~lambda:2. 0.05
+    let wind_speed = UnboundedCounter.make ~lambda:1. 0.015
+    and frame_rate = UnboundedCounter.make ~lambda:2. 0.05
     and density = BoundedCounter.make ~lambda:0.3 0.01
     and ts = 0 in
     Lwt.return {
@@ -371,6 +423,7 @@ end = struct
       h ;
       matrix ;
       frame_rate ;
+      wind_speed ;
       density ;
       ts ;
     }
@@ -382,10 +435,12 @@ end = struct
   let end_ts = max_int
 
   let update status =
+    Matrix.step ~w:status.w ~h:status.h
+      ~wind_speed:(UnboundedCounter.get status.wind_speed)
+      ~density:(BoundedCounter.get status.density)
+      status.matrix ;
     let status =
       { status with
-        matrix = Matrix.step ~w:status.w ~h:status.h
-            ~density:(BoundedCounter.get status.density) status.matrix ;
         ts = status.ts + 1 ;
       }
     in
@@ -395,6 +450,10 @@ end = struct
       | Some (event,events) ->
         let status = { status with events = events } in
         match Event.interpret event with
+        | `PageUp -> Some { status with
+                            wind_speed = UnboundedCounter.decr status.wind_speed }
+        | `PageDown -> Some { status with
+                              wind_speed = UnboundedCounter.incr status.wind_speed }
         | `Up -> Some { status with
                         frame_rate = UnboundedCounter.incr status.frame_rate }
         | `Down -> Some { status with
@@ -405,9 +464,10 @@ end = struct
                            density = BoundedCounter.incr status.density }
         | `Quit -> None
         | `Resize (w_term,h_term) ->
-          let w = w_term/2 and h = h_term in
-          let matrix = Matrix.adapt ~w ~h status.matrix in
-          Some { status with matrix ; w ; h }
+          let w0 = status.w and h0 = status.h in
+          let w1 = w_term/2 and h1 = h_term in
+          let matrix = Matrix.adapt ~w0 ~h0 ~w1 ~h1 status.matrix in
+          Some { status with matrix ; w = w1 ; h = h1 }
         | `Ignore -> Some status
 
   let close {term;_} =
