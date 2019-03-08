@@ -1,2 +1,3 @@
 - add panes (with depth and speed)
 - change a few letters randomely
+- find a way to run tests from dune

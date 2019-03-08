@@ -1,0 +1,23 @@
+opam-version: "2.0"
+version: "0.1"
+maintainer: "Quentin Heath <12143333+qheath@users.noreply.github.com>"
+authors: "Quentin Heath <12143333+qheath@users.noreply.github.com>"
+homepage: "https://github.com/qheath/matrix"
+bug-reports: "https://github.com/qheath/matrix/issues"
+dev-repo: "git://github.com/qheath/matrix.git"
+license: "GPL-3"
+build: [
+  ["dune" "build" "-p" name "-j" jobs "@install"]
+]
+
+depends: [
+  "notty" {build}
+  "gg" {build}
+]
+synopsis: "Experiments with Notty"
+description: """
+- two versions of a matrix-style screensaver
+#url {
+#  src: ""
+#  checksum: ""
+#}

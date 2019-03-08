@@ -3,10 +3,3 @@
   (flags (:standard -w +a -warn-error +a-48)))
  (release
   (flags (:standard -w +a))))
-
-(alias
- (name    runtest)
- (deps    (:test src/test.bc))
- (action
-  (progn
-   (run %{test}))))
